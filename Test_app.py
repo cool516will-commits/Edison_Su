@@ -1,35 +1,13 @@
 import streamlit as st
-from FinMind.data import DataLoader
 import pandas as pd
 
-st.title("簡化版資金流")
+st.title("📱 Streamlit 正常測試")
 
-api = DataLoader()
-api.login_by_token(api_token="你的token")
+df = pd.DataFrame({
+    "股票": ["2330", "2454", "2317"],
+    "漲跌%": [1.2, -0.5, 2.3]
+})
 
-stocks = ["2330","2454","2317"]
+st.dataframe(df)
 
-rows = []
-
-for s in stocks:
-    try:
-        df = api.taiwan_stock_daily(
-            stock_id=s,
-            start_date="2025-01-01"
-        )
-
-        df = df.sort_values("date")
-
-        close = df["close"]
-
-        change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
-
-        rows.append({
-            "股票": s,
-            "漲跌%": round(change,2)
-        })
-
-    except:
-        st.write(f"{s} error")
-
-st.dataframe(pd.DataFrame(rows))
+st.success("✅ Streamlit 已正常運作")
