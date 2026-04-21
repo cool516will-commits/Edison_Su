@@ -1,4 +1,5 @@
-streamlit
-FinMind
+streamlit==1.33.0
 pandas
+requests
+FinMind
 tqdm
