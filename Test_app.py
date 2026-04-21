@@ -1,96 +1,103 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import plotly.express as px
 from datetime import datetime
 
-# --- 1. 詳細監控清單 (你可以隨時在這裡增加股票) ---
-WATCHLIST = {
-    "👑 權值指標 (大盤風向)": ["2330.TW", "2454.TW", "2317.TW"],
-    "💻 AI/ASIC (領頭羊)": ["3661.TW", "3443.TW", "6526.TW", "2388.TW", "6669.TW"],
-    "🛠️ 半導體設備 (擴產題材)": ["8028.TW", "3167.TW", "3055.TW", "3583.TW"],
-    "🔗 散熱/伺服器 (AI硬體)": ["3017.TW", "3324.TW", "2382.TW", "2301.TW"],
-    "💵 匯率指標": ["TWD=X"]
-}
+# --- 配置 ---
+st.set_page_config(page_title="AI 股市分類工具", layout="wide")
 
-st.set_page_config(page_title="外資資金流向雷達 2.0", layout="wide")
+st.title("🤖 智能股市分類與資金流向工具")
+st.markdown("我是你的中間分析人：自動抓取市場熱門股，並依據產業題材進行即時分類。")
 
-# 顯示最後更新時間
-st.sidebar.write(f"🕒 數據最後更新：{datetime.now().strftime('%H:%M:%S')}")
+# 1. 建立一個較大的「自動抓取池」(涵蓋台灣各產業指標股)
+# 這樣你不用手動管 50 強，我會自動從這裡面挑選「有資金流進」的出來
+SEED_TICKERS = [
+    # AI/半導體
+    "2330.TW", "2454.TW", "2317.TW", "3661.TW", "3443.TW", "3017.TW", "3324.TW", "6669.TW",
+    # 綠能/重電
+    "1513.TW", "1519.TW", "1503.TW", "6806.TW",
+    # 航運/傳統
+    "2603.TW", "2609.TW", "2615.TW", "2002.TW", "1301.TW",
+    # 金融/生技
+    "2881.TW", "2882.TW", "1760.TW", "6446.TW", "4147.TW"
+]
 
-@st.cache_data(ttl=300)
-def get_data():
-    all_tickers = [item for sublist in WATCHLIST.values() for item in sublist]
-    data = yf.download(all_tickers, period="1d", interval="5m", auto_adjust=True)
-    return data['Close']
+@st.cache_data(ttl=600)
+def analyze_and_classify():
+    results = []
+    # 抓取數據
+    data = yf.download(SEED_TICKERS, period="2d", interval="15m")
+    
+    for t in SEED_TICKERS:
+        try:
+            ticker_info = yf.Ticker(t)
+            # 中間人分析：取得產業資訊 (Sector)
+            sector = ticker_info.info.get('sector', '其他題材')
+            # 翻譯產業類別
+            sector_map = {
+                "Technology": "💻 科技大熱門",
+                "Financial Services": "🏦 金融/保險",
+                "Industrials": "⚙️ 工業/重電/航運",
+                "Basic Materials": "🧱 基礎原物料",
+                "Healthcare": "🧬 生技醫療"
+            }
+            theme = sector_map.get(sector, sector)
+            
+            close = data['Close'][t].dropna()
+            vol = data['Volume'][t].dropna()
+            
+            if not close.empty:
+                change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
+                # 資金流向強度 = 漲幅 * 當前量能對比平均量的倍數
+                flow_strength = change * (vol.iloc[-1] / vol.mean())
+                
+                results.append({
+                    "題材分類": theme,
+                    "股票名稱": ticker_info.info.get('shortName', t),
+                    "代碼": t,
+                    "今日漲跌(%)": round(change, 2),
+                    "資金流向強度": round(flow_strength, 2)
+                })
+        except:
+            continue
+    return pd.DataFrame(results)
 
 try:
-    df = get_data()
-    if df.empty:
-        st.warning("目前非交易時段或無法取得數據。")
-    else:
-        # --- 計算匯率 ---
-        twd_s = df["TWD=X"].dropna()
-        latest_twd = twd_s.iloc[-1]
-        twd_change = latest_twd - twd_s.iloc[0]
-        is_twd_strong = twd_change < 0
+    with st.spinner("中間人正在分析市場數據並進行分類..."):
+        df_analysis = analyze_and_classify()
 
-        # --- 計算所有個股漲幅並分類 ---
-        all_results = []
-        group_avg = {}
-        
-        for group, tickers in WATCHLIST.items():
-            if group == "💵 匯率指標": continue
-            
-            group_data = df[tickers].dropna(axis=1, how='all')
-            if not group_data.empty:
-                # 計算該組每支股票的漲幅
-                individual_changes = (group_data.iloc[-1] / group_data.iloc[0] - 1) * 100
-                for ticker, change in individual_changes.items():
-                    all_results.append({"分類": group, "股票代碼": ticker, "今日漲幅(%)": round(change, 2)})
-                
-                # 計算該組平均
-                group_avg[group] = individual_changes.mean()
+    # --- UI 呈現 ---
+    c1, c2 = st.columns([7, 3])
 
-        # --- UI 呈現：頂部卡片 ---
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.metric("美金/台幣 (USD/TWD)", f"{latest_twd:.3f}", 
-                      f"{twd_change:.3f} ({'升值' if is_twd_strong else '貶值'})", delta_color="inverse")
-        with c2:
-            st.metric("權值股平均表現", f"{group_avg.get('👑 權值指標 (大盤風向)', 0):.2f}%")
-        with c3:
-            score = 0
-            if is_twd_strong: score += 40
-            if group_avg.get('👑 權值指標 (大盤風向)', 0) > 0.5: score += 30
-            if any(v > 1.5 for v in group_avg.values()): score += 30
-            st.write(f"### 外資進場信心：**{score}** / 100")
-            st.progress(score / 100)
-
-        st.divider()
-
-        # --- 詳細圖表分析 ---
-        st.subheader("🔍 個股題材詳細漲幅對照圖")
-        
-        # 整理成 DataFrame 方便畫圖
-        plot_df = pd.DataFrame(all_results)
-        
-        # 使用顏色區分分類，畫出橫向條形圖
-        import plotly.express as px # Streamlit 內建支援 plotly
-        fig = px.bar(plot_df, 
-                     x="今日漲幅(%)", 
-                     y="股票代碼", 
-                     color="分類",
-                     text="今日漲幅(%)",
-                     orientation='h',
-                     title="各題材成分股即時漲跌狀況",
-                     color_discrete_sequence=px.colors.qualitative.Pastel)
-        
-        fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=600)
+    with c1:
+        st.subheader("📊 市場題材熱度分布")
+        # 使用 Treemap (樹狀圖) 呈現分類，面積越大代表資金流入越多
+        fig = px.treemap(df_analysis, 
+                         path=['題材分類', '股票名稱'], 
+                         values=df_analysis['資金流向強度'].abs(),
+                         color='今日漲跌(%)',
+                         color_continuous_scale='RdBu_r',
+                         hover_data=['代碼', '資金流向強度'])
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- 表格清單 ---
-        with st.expander("看詳細數據表格"):
-            st.table(plot_df.sort_values(by="今日漲幅(%)", ascending=False))
+    with c2:
+        st.subheader("🔥 資金流入前五名")
+        top_5 = df_analysis.sort_values(by="資金流向強度", ascending=False).head(5)
+        for _, row in top_5.iterrows():
+            st.success(f"**{row['股票名稱']}** ({row['題材分類']}) \n\n 強度：{row['資金流向強度']}")
+
+    st.divider()
+
+    # --- 分類工具區 ---
+    st.subheader("📂 依產業題材過濾")
+    selected_sector = st.multiselect("選擇你想關注的分類：", df_analysis['題材分類'].unique())
+    if selected_sector:
+        st.dataframe(df_analysis[df_analysis['題材分類'].isin(selected_sector)], use_container_width=True)
+    else:
+        st.dataframe(df_analysis, use_container_width=True)
 
 except Exception as e:
-    st.error(f"錯誤報告：{e}")
+    st.error(f"分析過程中發生錯誤: {e}")
+
+st.caption
