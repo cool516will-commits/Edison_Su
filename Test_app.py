@@ -1,231 +1,103 @@
-from FinMind.data import DataLoader
+import streamlit as st
+import yfinance as yf
 import pandas as pd
-import requests
-import schedule
-import time
+from datetime import datetime
 
-# ================================
-# 🔧 設定
-# ================================
-LINE_TOKEN = "你的LINE_TOKEN"   # ←改這裡
-START_DATE = "2026-03-01"
+# 設定監控清單
+WATCHLIST = {
+    "權值指標": ["2330.TW", "2454.TW", "2317.TW"],
+    "AI/ASIC": ["3661.TW", "3443.TW", "6526.TW", "2388.TW"],
+    "半導體設備": ["8028.TW", "3167.TW", "3055.TW"],
+    "匯率指標": ["TWD=X"]
+}
 
-api = DataLoader()
+st.set_page_config(page_title="外資資金流向雷達", layout="wide")
 
-# ================================
-# 🔔 LINE通知
-# ================================
-def send_line(msg):
-    try:
-        url = "https://notify-api.line.me/api/notify"
-        headers = {"Authorization": f"Bearer {LINE_TOKEN}"}
-        data = {"message": msg}
-        requests.post(url, headers=headers, data=data)
-    except Exception as e:
-        print("LINE 發送失敗:", e)
+# 頁面標題與最後更新時間
+col_t1, col_t2 = st.columns([3, 1])
+with col_t1:
+    st.title("🏹 外資資金流向即時監控儀表板")
+with col_t2:
+    st.write(f"最後更新：{datetime.now().strftime('%H:%M:%S')}")
 
-# ================================
-# 📊 股票清單
-# ================================
-def get_all_stocks():
-    df = api.taiwan_stock_info()
-    return df[df["industry_category"].notnull()][
-        ["stock_id", "stock_name", "industry_category"]
-    ]
+@st.cache_data(ttl=300) # 快取 5 分鐘，避免頻繁請求被 yfinance 封鎖
+def get_data():
+    all_tickers = [item for sublist in WATCHLIST.values() for item in sublist]
+    # 使用 auto_adjust 確保獲取正確收盤價
+    data = yf.download(all_tickers, period="1d", interval="5m", auto_adjust=True)
+    return data['Close']
 
-# ================================
-# 📈 價格資料
-# ================================
-def get_price(stock_id):
-    try:
-        df = api.taiwan_stock_daily(
-            stock_id=stock_id,
-            start_date=START_DATE
-        )
-        return df.tail(30)
-    except:
-        return None
-
-# ================================
-# 💰 三大法人
-# ================================
-def get_flow(stock_id):
-    try:
-        data = api.taiwan_stock_institutional_investors(
-            stock_id=stock_id,
-            start_date="2026-04-01"
-        )
-        if data.empty:
-            return 0
-
-        latest = data.iloc[-1]
-        return (
-            latest["Foreign_Investor"] +
-            latest["Investment_Trust"] +
-            latest["Dealer"]
-        )
-    except:
-        return 0
-
-# ================================
-# 🧠 題材分類
-# ================================
-def classify_theme(name):
-    name = str(name)
-
-    if any(x in name for x in ["廣達", "緯創", "緯穎", "英業達"]):
-        return "AI"
-    elif any(x in name for x in ["台積", "聯電"]):
-        return "半導體"
-    elif "光" in name:
-        return "矽光子"
-    elif any(x in name for x in ["國巨", "電容"]):
-        return "被動元件"
-    elif any(x in name for x in ["散熱", "風扇"]):
-        return "散熱"
+try:
+    df = get_data()
+    
+    # 檢查資料是否完整
+    if df.empty:
+        st.warning("目前非交易時段或無法取得即時數據。")
     else:
-        return "其他"
+        # 1. 匯率邏輯
+        twd_price = df["TWD=X"].dropna()
+        latest_twd = twd_price.iloc[-1]
+        open_twd = twd_price.iloc[0]
+        twd_change = latest_twd - open_twd
+        # 升值 (數值下降) 為利多
+        is_twd_strong = twd_change < 0 
 
-# ================================
-# 🔥 爆量突破
-# ================================
-def detect_breakout(df):
-    if df is None or len(df) < 10:
-        return False
+        # 2. 族群漲幅計算
+        group_stats = {}
+        for group, tickers in WATCHLIST.items():
+            if group != "匯率指標":
+                # 剔除 NaN 避免計算錯誤
+                group_data = df[tickers].dropna(how='all')
+                if not group_data.empty:
+                    # 計算今日區間漲幅
+                    move = (group_data.iloc[-1] / group_data.iloc[0] - 1).mean() * 100
+                    group_stats[group] = move
 
-    latest = df.iloc[-1]
-    avg_vol = df["Trading_Volume"].mean()
-    max_price = df["close"].max()
+        # 3. 核心指標呈現
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            # 匯率：delta 顯示負數（升值）時呈現綠色(利多)
+            st.metric("美金/台幣 (USD/TWD)", 
+                      f"{latest_twd:.3f}", 
+                      f"{twd_change:.3f} {'(升值)' if is_twd_strong else '(貶值)'}",
+                      delta_color="inverse") 
 
-    return (
-        latest["Trading_Volume"] > 2 * avg_vol and
-        latest["close"] > 0.95 * max_price
-    )
+        with c2:
+            avg_heavy = group_stats.get("權值指標", 0)
+            st.metric("權值指標平均漲跌", f"{avg_heavy:.2f}%", delta_color="normal")
 
-# ================================
-# 🧠 主力行為（模擬）
-# ================================
-def detect_main_force(df):
-    if df is None or len(df) < 15:
-        return False
+        with c3:
+            # 信心分數算法優化
+            score = 0
+            if is_twd_strong: score += 40
+            if group_stats.get("權值指標", 0) > 0.5: score += 30
+            if group_stats.get("AI/ASIC", 0) > 1.5: score += 30
+            
+            # 使用進度條顯示信心
+            st.write(f"**外資進場信心分數：{score} / 100**")
+            st.progress(score / 100)
 
-    df = df.sort_values("date")
+        st.divider()
 
-    early = df.iloc[:10]
-    late = df.iloc[-5:]
+        # 4. 視覺化圖表
+        chart_col, info_col = st.columns([2, 1])
+        
+        with chart_col:
+            st.subheader("📊 關鍵族群今日漲幅排行")
+            chart_df = pd.DataFrame.from_dict(group_stats, orient='index', columns=['漲幅(%)'])
+            st.bar_chart(chart_df)
 
-    return (
-        late["Trading_Volume"].mean() >
-        early["Trading_Volume"].mean() * 1.5 and
-        late["close"].mean() > early["close"].mean()
-    )
+        with info_col:
+            st.subheader("💡 盤勢分析")
+            if score >= 70:
+                st.success("🔥 **強力偏多**：匯率助攻且大型股帶頭，適合尋找強勢股切入。")
+            elif score <= 30:
+                st.error("⚠️ **資金退潮**：台幣貶值且權值股疲軟，建議保留現金或避險。")
+            else:
+                st.info("🔎 **震盪整理**：資金無明顯方向，以個股表現為主。")
 
-# ================================
-# ⚠️ 假突破
-# ================================
-def is_fake_breakout(df):
-    if df is None or len(df) < 1:
-        return True
+except Exception as e:
+    st.error(f"系統錯誤：{e}")
 
-    latest = df.iloc[-1]
-
-    upper_shadow = latest["max"] - max(latest["open"], latest["close"])
-    body = abs(latest["close"] - latest["open"])
-
-    return upper_shadow > body * 1.5 or latest["close"] < latest["open"]
-
-# ================================
-# 🎯 交易策略
-# ================================
-def trading_signal(df):
-    if df is None or len(df) < 20:
-        return "NO"
-
-    ma5 = df["close"].rolling(5).mean().iloc[-1]
-    ma20 = df["close"].rolling(20).mean().iloc[-1]
-    latest = df.iloc[-1]
-
-    if latest["close"] > ma5 > ma20:
-        return "BUY"
-    elif latest["close"] < ma5:
-        return "SELL"
-    return "HOLD"
-
-# ================================
-# 🚀 主掃描
-# ================================
-def scan_market():
-    print("🚀 掃描市場中...")
-
-    stocks = get_all_stocks()
-    signals = []
-
-    for _, row in stocks.iterrows():
-        sid = row["stock_id"]
-        name = row["stock_name"]
-
-        df = get_price(sid)
-        if df is None:
-            continue
-
-        if not detect_breakout(df):
-            continue
-
-        if not detect_main_force(df):
-            continue
-
-        if is_fake_breakout(df):
-            continue
-
-        flow = get_flow(sid)
-        if flow < 0:
-            continue
-
-        signal = trading_signal(df)
-        theme = classify_theme(name)
-
-        signals.append({
-            "stock": sid,
-            "name": name,
-            "theme": theme,
-            "flow": flow,
-            "signal": signal
-        })
-
-    result = pd.DataFrame(signals)
-
-    if result.empty:
-        print("❌ 無強勢股")
-        return
-
-    result = result.sort_values(by="flow", ascending=False)
-
-    print("\n🔥 強勢股：")
-    print(result.head(10))
-
-    theme_rank = result.groupby("theme")["flow"].sum()
-
-    msg = "🔥 主力訊號\n\n"
-    msg += result.head(5).to_string(index=False) + "\n\n"
-    msg += "🔥 題材排行\n" + theme_rank.to_string()
-
-    send_line(msg)
-
-    result.to_csv("hot_stocks.csv", index=False)
-
-# ================================
-# ⏰ 排程（盤中用）
-# ================================
-def run_realtime():
-    schedule.every(5).minutes.do(scan_market)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-
-# ================================
-# ▶️ 執行
-# ================================
-if __name__ == "__main__":
-    scan_market()        # 單次跑
-    # run_realtime()     # 開盤用（打開這行）
+st.caption("數據來源：Yahoo Finance (延遲約 15 分鐘)。請勿將此作為唯一投資依據。")
