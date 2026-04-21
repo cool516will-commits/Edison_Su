@@ -2,41 +2,24 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 
-st.title("🧠 穩定資金流（防炸版）")
+st.title("🧠 超穩資金流（保命版）")
 
-TICKERS = ["2330.TW","2454.TW","2317.TW","2603.TW"]
-
-def safe_get(data, key):
-    try:
-        return data[key].dropna()
-    except:
-        return None
+TICKERS = ["2330.TW","2454.TW","2317.TW"]
 
 @st.cache_data(ttl=300)
 def load():
-
-    df = yf.download(
-        TICKERS,
-        period="5d",
-        interval="1d",
-        group_by="ticker",
-        progress=False
-    )
 
     rows = []
 
     for t in TICKERS:
         try:
-            d = safe_get(df, t)
+            df = yf.download(t, period="5d", interval="1d", progress=False)
 
-            if d is None or len(d) < 2:
+            if df.empty or len(df) < 2:
                 continue
 
-            close = d["Close"]
-            vol = d["Volume"]
-
-            if close.isna().any() or vol.isna().any():
-                continue
+            close = df["Close"]
+            vol = df["Volume"]
 
             change = (close.iloc[-1] / close.iloc[-2] - 1) * 100
             vol_ratio = vol.iloc[-1] / (vol.mean() + 1)
@@ -48,8 +31,13 @@ def load():
             })
 
         except Exception as e:
-            st.write(f"{t} skipped")
+            st.write(f"{t} skip")
 
     return pd.DataFrame(rows)
 
 df = load()
+
+if df.empty:
+    st.warning("沒有資料（但系統正常）")
+else:
+    st.dataframe(df)
